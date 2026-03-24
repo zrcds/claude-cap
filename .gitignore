@@ -1,0 +1,12 @@
+# Ignore WebView2 runtime and cache files
+webview2/
+EBWebView/
+*.log
+*.tmp
+
+# Common Windows junk
+Thumbs.db
+Desktop.ini
+*.exe
+bin/
+obj/

@@ -1,0 +1,7 @@
+C:\Users\sducroz\.claude\tools\claudecap\bin\publish-standalone\ClaudeCap.pdb
+C:\Users\sducroz\.claude\tools\claudecap\bin\publish-standalone\runtimes\win-x64\native\WebView2Loader.dll
+C:\Users\sducroz\.claude\tools\claudecap\bin\publish-standalone\WebView2Loader.dll
+C:\Users\sducroz\.claude\tools\claudecap\bin\publish-standalone\Microsoft.Web.WebView2.Core.xml
+C:\Users\sducroz\.claude\tools\claudecap\bin\publish-standalone\Microsoft.Web.WebView2.WinForms.xml
+C:\Users\sducroz\.claude\tools\claudecap\bin\publish-standalone\Microsoft.Web.WebView2.Wpf.xml
+C:\Users\sducroz\.claude\tools\claudecap\bin\publish-standalone\ClaudeCap.exe

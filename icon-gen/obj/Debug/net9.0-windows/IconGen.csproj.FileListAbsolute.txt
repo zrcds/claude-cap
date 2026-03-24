@@ -1,0 +1,14 @@
+C:\Users\sducroz\.claude\tools\claude-usage-tray\icon-gen\bin\Debug\net9.0-windows\IconGen.exe
+C:\Users\sducroz\.claude\tools\claude-usage-tray\icon-gen\bin\Debug\net9.0-windows\IconGen.deps.json
+C:\Users\sducroz\.claude\tools\claude-usage-tray\icon-gen\bin\Debug\net9.0-windows\IconGen.runtimeconfig.json
+C:\Users\sducroz\.claude\tools\claude-usage-tray\icon-gen\bin\Debug\net9.0-windows\IconGen.dll
+C:\Users\sducroz\.claude\tools\claude-usage-tray\icon-gen\bin\Debug\net9.0-windows\IconGen.pdb
+C:\Users\sducroz\.claude\tools\claude-usage-tray\icon-gen\obj\Debug\net9.0-windows\IconGen.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\sducroz\.claude\tools\claude-usage-tray\icon-gen\obj\Debug\net9.0-windows\IconGen.AssemblyInfoInputs.cache
+C:\Users\sducroz\.claude\tools\claude-usage-tray\icon-gen\obj\Debug\net9.0-windows\IconGen.AssemblyInfo.cs
+C:\Users\sducroz\.claude\tools\claude-usage-tray\icon-gen\obj\Debug\net9.0-windows\IconGen.csproj.CoreCompileInputs.cache
+C:\Users\sducroz\.claude\tools\claude-usage-tray\icon-gen\obj\Debug\net9.0-windows\IconGen.dll
+C:\Users\sducroz\.claude\tools\claude-usage-tray\icon-gen\obj\Debug\net9.0-windows\refint\IconGen.dll
+C:\Users\sducroz\.claude\tools\claude-usage-tray\icon-gen\obj\Debug\net9.0-windows\IconGen.pdb
+C:\Users\sducroz\.claude\tools\claude-usage-tray\icon-gen\obj\Debug\net9.0-windows\IconGen.genruntimeconfig.cache
+C:\Users\sducroz\.claude\tools\claude-usage-tray\icon-gen\obj\Debug\net9.0-windows\ref\IconGen.dll

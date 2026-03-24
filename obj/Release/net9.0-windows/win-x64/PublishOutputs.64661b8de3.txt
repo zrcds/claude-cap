@@ -1,0 +1,7 @@
+C:\Users\sducroz\.claude\tools\claudecap\bin\publish-slim\ClaudeCap.pdb
+C:\Users\sducroz\.claude\tools\claudecap\bin\publish-slim\runtimes\win-x64\native\WebView2Loader.dll
+C:\Users\sducroz\.claude\tools\claudecap\bin\publish-slim\WebView2Loader.dll
+C:\Users\sducroz\.claude\tools\claudecap\bin\publish-slim\Microsoft.Web.WebView2.Core.xml
+C:\Users\sducroz\.claude\tools\claudecap\bin\publish-slim\Microsoft.Web.WebView2.WinForms.xml
+C:\Users\sducroz\.claude\tools\claudecap\bin\publish-slim\Microsoft.Web.WebView2.Wpf.xml
+C:\Users\sducroz\.claude\tools\claudecap\bin\publish-slim\ClaudeCap.exe
