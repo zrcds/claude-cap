@@ -203,13 +203,13 @@ static class Program
         {
             _lastNotifiedThreshold = threshold;
             if (threshold >= 100)
-                _trayIcon!.ShowBalloonTip(5000, "Claude Usage",
+                _trayIcon!.ShowBalloonTip(5000, "Claude Cap",
                     $"Plan limit reached! ({result.Percent}%)", ToolTipIcon.Error);
             else if (threshold >= 90)
-                _trayIcon!.ShowBalloonTip(4000, "Claude Usage",
+                _trayIcon!.ShowBalloonTip(4000, "Claude Cap",
                     $"⚠️ {result.Percent}% of plan used!", ToolTipIcon.Warning);
             else
-                _trayIcon!.ShowBalloonTip(3000, "Claude Usage",
+                _trayIcon!.ShowBalloonTip(3000, "Claude Cap",
                     $"{result.Percent}% of plan used.", ToolTipIcon.Info);
         }
     }
