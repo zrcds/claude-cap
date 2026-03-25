@@ -4,8 +4,11 @@ using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Media.Imaging;
 using Avalonia.Themes.Fluent;
 using Avalonia.Threading;
-using Microsoft.Win32;
+using SkiaSharp;
 using System.Text.Json;
+#if WINDOWS
+using Microsoft.Win32;
+#endif
 
 namespace ClaudeCap;
 
@@ -54,8 +57,10 @@ static class TrayApp
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
         ".claude", "usage_data.json");
 
-    private const string AppName       = "ClaudeCap";
+    private const string AppName = "ClaudeCap";
+#if WINDOWS
     private const string StartupRegKey = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
+#endif
 
     private static WindowIcon _iconNormal = null!;
     private static WindowIcon _iconError  = null!;
@@ -87,47 +92,46 @@ static class TrayApp
         _ = RefreshAsync();
     }
 
-    // ── Icons ─────────────────────────────────────────────────────────────────
+    // ── Icons (SkiaSharp — cross-platform) ───────────────────────────────────
 
     static void LoadIcons()
     {
         using var stream = typeof(TrayApp).Assembly
             .GetManifestResourceStream("ClaudeCap.icon.ico")!;
-        using var baseIco = new System.Drawing.Icon(stream, 16, 16);
-        using var baseBmp = baseIco.ToBitmap();
+        using var baseBmp = SKBitmap.Decode(stream)
+            ?? throw new Exception("Failed to decode icon.ico");
 
-        _iconNormal = BitmapToWindowIcon(baseBmp);
-        _iconError  = TintWindowIcon(baseBmp, System.Drawing.Color.FromArgb(210,  45,  45));
-        _iconDim    = TintWindowIcon(baseBmp, System.Drawing.Color.FromArgb( 90,  90,  90));
-        _iconOrange = TintWindowIcon(baseBmp, System.Drawing.Color.FromArgb(220, 120,  20));
-        _iconMaxed  = TintWindowIcon(baseBmp, System.Drawing.Color.FromArgb(180,   0,   0));
+        _iconNormal = SkiaBitmapToWindowIcon(baseBmp);
+        _iconError  = TintWithSkia(baseBmp, new SKColor(210,  45,  45));
+        _iconDim    = TintWithSkia(baseBmp, new SKColor( 90,  90,  90));
+        _iconOrange = TintWithSkia(baseBmp, new SKColor(220, 120,  20));
+        _iconMaxed  = TintWithSkia(baseBmp, new SKColor(180,   0,   0));
     }
 
-    static WindowIcon BitmapToWindowIcon(System.Drawing.Bitmap bmp)
+    static WindowIcon SkiaBitmapToWindowIcon(SKBitmap bmp)
     {
-        using var ms = new MemoryStream();
-        bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
-        ms.Position = 0;
+        using var img  = SKImage.FromBitmap(bmp);
+        using var data = img.Encode(SKEncodedImageFormat.Png, 100);
+        using var ms   = new MemoryStream(data.ToArray());
         return new WindowIcon(ms);
     }
 
-    static WindowIcon TintWindowIcon(System.Drawing.Bitmap src, System.Drawing.Color tint)
+    static WindowIcon TintWithSkia(SKBitmap src, SKColor tint)
     {
-        var dst = new System.Drawing.Bitmap(src.Width, src.Height,
-            System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        var dst = new SKBitmap(src.Width, src.Height);
         for (int y = 0; y < src.Height; y++)
         for (int x = 0; x < src.Width;  x++)
         {
             var px = src.GetPixel(x, y);
-            if (px.A == 0) { dst.SetPixel(x, y, System.Drawing.Color.Transparent); continue; }
-            float lum = (0.299f * px.R + 0.587f * px.G + 0.114f * px.B) / 255f;
-            dst.SetPixel(x, y, System.Drawing.Color.FromArgb(
-                px.A,
-                (int)(lum * tint.R),
-                (int)(lum * tint.G),
-                (int)(lum * tint.B)));
+            if (px.Alpha == 0) { dst.SetPixel(x, y, SKColors.Transparent); continue; }
+            float lum = (0.299f * px.Red + 0.587f * px.Green + 0.114f * px.Blue) / 255f;
+            dst.SetPixel(x, y, new SKColor(
+                (byte)(lum * tint.Red),
+                (byte)(lum * tint.Green),
+                (byte)(lum * tint.Blue),
+                px.Alpha));
         }
-        var result = BitmapToWindowIcon(dst);
+        var result = SkiaBitmapToWindowIcon(dst);
         dst.Dispose();
         return result;
     }
@@ -383,6 +387,7 @@ static class TrayApp
         }
         catch (Exception ex) { Logger.Log($"SelfInstall: settings error: {ex.Message}"); }
 
+#if WINDOWS
         try
         {
             using var key = Registry.CurrentUser.OpenSubKey(StartupRegKey, true);
@@ -398,6 +403,7 @@ static class TrayApp
             }
         }
         catch (Exception ex) { Logger.Log($"SelfInstall: registry error: {ex.Message}"); }
+#endif
     }
 
     static void OpenUsagePage() =>
@@ -421,16 +427,57 @@ static class TrayApp
 
     static bool IsStartupEnabled()
     {
+#if WINDOWS
         using var key = Registry.CurrentUser.OpenSubKey(StartupRegKey, false);
         return key?.GetValue(AppName) != null;
+#elif MACOS
+        return File.Exists(MacLaunchAgentPlist);
+#else
+        return false;
+#endif
     }
 
     static void SetStartup(bool enable)
     {
+#if WINDOWS
         using var key = Registry.CurrentUser.OpenSubKey(StartupRegKey, true)!;
         if (enable) key.SetValue(AppName, $"\"{Environment.ProcessPath}\"");
         else        key.DeleteValue(AppName, false);
+#elif MACOS
+        if (enable)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(MacLaunchAgentPlist)!);
+            File.WriteAllText(MacLaunchAgentPlist, $"""
+                <?xml version="1.0" encoding="UTF-8"?>
+                <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+                <plist version="1.0">
+                <dict>
+                    <key>Label</key>
+                    <string>com.zrcds.claudecap</string>
+                    <key>ProgramArguments</key>
+                    <array>
+                        <string>{Environment.ProcessPath}</string>
+                    </array>
+                    <key>RunAtLoad</key>
+                    <true/>
+                    <key>KeepAlive</key>
+                    <false/>
+                </dict>
+                </plist>
+                """);
+        }
+        else
+        {
+            if (File.Exists(MacLaunchAgentPlist)) File.Delete(MacLaunchAgentPlist);
+        }
+#endif
     }
+
+#if MACOS
+    static readonly string MacLaunchAgentPlist = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+        "Library", "LaunchAgents", "com.zrcds.claudecap.plist");
+#endif
 
     static void ExitApp()
     {

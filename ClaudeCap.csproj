@@ -1,7 +1,10 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
+    <!-- To build for macOS: change to <TargetFrameworks>net9.0-windows;net9.0-macos</TargetFrameworks>
+         and run: dotnet workload install macos -->
     <OutputType>WinExe</OutputType>
+    <OutputType Condition="'$(TargetFramework)' == 'net9.0-macos'">Exe</OutputType>
     <TargetFramework>net9.0-windows</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
@@ -9,7 +12,7 @@
     <RootNamespace>ClaudeCap</RootNamespace>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
-    <ApplicationIcon>icon.ico</ApplicationIcon>
+    <ApplicationIcon Condition="'$(TargetFramework)' == 'net9.0-windows'">icon.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
@@ -17,12 +20,18 @@
     <EmbeddedResource Include="statusline-command.sh" />
   </ItemGroup>
 
+  <!-- Cross-platform packages -->
   <ItemGroup>
-    <PackageReference Include="Avalonia"              Version="11.3.12" />
-    <PackageReference Include="Avalonia.Desktop"      Version="11.3.12" />
+    <PackageReference Include="Avalonia"               Version="11.3.12" />
+    <PackageReference Include="Avalonia.Desktop"       Version="11.3.12" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.12" />
-    <PackageReference Include="System.Drawing.Common"  Version="9.0.0" />
-    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2849.39" />
+    <PackageReference Include="SkiaSharp"              Version="3.119.2" />
+  </ItemGroup>
+
+  <!-- Windows-only packages -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net9.0-windows'">
+    <PackageReference Include="System.Drawing.Common"    Version="9.0.0" />
+    <PackageReference Include="Microsoft.Web.WebView2"   Version="1.0.2849.39" />
     <PackageReference Include="Microsoft.Win32.Registry" Version="5.0.0" />
   </ItemGroup>
 
