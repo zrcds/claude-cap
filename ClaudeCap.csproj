@@ -3,7 +3,6 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net9.0-windows</TargetFramework>
-    <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AssemblyName>ClaudeCap</AssemblyName>
@@ -19,13 +18,17 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="Avalonia"              Version="11.3.12" />
+    <PackageReference Include="Avalonia.Desktop"      Version="11.3.12" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.12" />
+    <PackageReference Include="System.Drawing.Common"  Version="9.0.0" />
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2849.39" />
     <PackageReference Include="Microsoft.Win32.Registry" Version="5.0.0" />
   </ItemGroup>
 
-  <!-- Exclude the icon-gen sub-project from this build -->
   <ItemGroup>
     <Compile Remove="icon-gen\**" />
+    <Compile Remove="UsageGraphForm.cs" />
   </ItemGroup>
 
 </Project>

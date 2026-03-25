@@ -1,15 +1,14 @@
+using Avalonia.Controls;
 using Microsoft.Web.WebView2.Core;
-using Microsoft.Web.WebView2.WinForms;
 using System.Text.Json;
 
 namespace ClaudeCap;
 
 /// <summary>
-/// Uses WebView2 for both authentication and all API calls.
-/// HttpClient is NOT used — Cloudflare blocks it regardless of cookies.
-/// Instead, fetch() is executed inside the real Chromium engine via
-/// ExecuteScriptAsync + postMessage, which has the correct browser
-/// fingerprint and cf_clearance cookie already set.
+/// Hosts WebView2 Core inside an Avalonia Window (no WinForms dependency).
+/// The Avalonia window provides the HWND parent for the CoreWebView2Controller.
+/// HttpClient is NOT used — Cloudflare blocks it. All API calls run via
+/// fetch() inside the real Chromium engine using ExecuteScriptAsync + postMessage.
 /// </summary>
 sealed class ClaudeWebScraper : IDisposable
 {
@@ -19,13 +18,13 @@ sealed class ClaudeWebScraper : IDisposable
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
         ".claude", "tools", "claudecap", "webview2");
 
-    private Form    _host  = null!;
-    private WebView2 _wv   = null!;
-    private bool    _ready;
+    private Window                   _host       = null!;
+    private CoreWebView2Controller   _controller = null!;
+    private CoreWebView2             _wv         = null!;
+    private bool                     _ready;
 
     public static readonly ClaudeWebScraper Instance = new();
     private ClaudeWebScraper() { }
-
 
     // ── Init ─────────────────────────────────────────────────────────────────
 
@@ -34,23 +33,34 @@ sealed class ClaudeWebScraper : IDisposable
         if (_ready) return;
         Logger.Log("WebView2: initializing");
 
-        _host = new Form
+        // Create an Avalonia window to host WebView2 — no WinForms needed
+        _host = new Window
         {
-            Text            = "Claude Cap",
-            Size            = new System.Drawing.Size(900, 680),
-            StartPosition   = FormStartPosition.Manual,
-            Location        = new System.Drawing.Point(-32000, -32000),
-            ShowInTaskbar   = false,
-            FormBorderStyle = FormBorderStyle.Sizable,
+            Title                 = "Claude Cap",
+            Width                 = 900,
+            Height                = 680,
+            ShowInTaskbar         = false,
+            SystemDecorations     = SystemDecorations.Full,
+            WindowStartupLocation = WindowStartupLocation.CenterScreen,
         };
-        _wv = new WebView2 { Dock = DockStyle.Fill };
-        _host.Controls.Add(_wv);
 
+        // Show briefly off-screen to obtain the underlying HWND
+        _host.Show();
+        await Task.Delay(100);
+
+        var hwnd = _host.TryGetPlatformHandle()?.Handle ?? IntPtr.Zero;
+        if (hwnd == IntPtr.Zero)
+            throw new InvalidOperationException("Could not obtain HWND from Avalonia window");
+
+        _host.Hide();
+
+        // Create WebView2 controller attached to the Avalonia window's HWND
         Directory.CreateDirectory(DataFolder);
         var env = await CoreWebView2Environment.CreateAsync(null, DataFolder);
-        _host.Show();
-        await _wv.EnsureCoreWebView2Async(env);
-        _host.Hide();
+        _controller = await env.CreateCoreWebView2ControllerAsync(hwnd);
+        _controller.IsVisible = false;
+        _controller.Bounds    = new System.Drawing.Rectangle(0, 0, 900, 680);
+        _wv = _controller.CoreWebView2;
 
         Logger.Log("WebView2: ready");
         _ready = true;
@@ -63,7 +73,6 @@ sealed class ClaudeWebScraper : IDisposable
         await EnsureInitAsync();
         Logger.Log("WebView2: FetchAsync");
 
-        // 1. Try with existing session
         if (await GetSessionKeyAsync() != null)
         {
             var result = await GetUsageAsync();
@@ -71,7 +80,6 @@ sealed class ClaudeWebScraper : IDisposable
             Logger.Log("WebView2: session present but API failed — re-authenticating");
         }
 
-        // 2. Need login
         var key = await LoginAsync();
         if (key == null) return null;
 
@@ -84,11 +92,9 @@ sealed class ClaudeWebScraper : IDisposable
     {
         try
         {
-            var cookies = await _wv.CoreWebView2.CookieManager.GetCookiesAsync("https://claude.ai");
-            var key = cookies.FirstOrDefault(c => c.Name == "sessionKey")?.Value;
-            Logger.Log(key != null
-                ? "WebView2: sessionKey found in cookie store"
-                : "WebView2: no sessionKey in cookie store");
+            var cookies = await _wv.CookieManager.GetCookiesAsync("https://claude.ai");
+            var key     = cookies.FirstOrDefault(c => c.Name == "sessionKey")?.Value;
+            Logger.Log(key != null ? "WebView2: sessionKey found" : "WebView2: no sessionKey");
             return key;
         }
         catch (Exception ex)
@@ -106,20 +112,16 @@ sealed class ClaudeWebScraper : IDisposable
         var tcs = new TaskCompletionSource<bool>();
 
         EventHandler<CoreWebView2SourceChangedEventArgs>? sourceHandler = null;
-
-        void Cleanup()
-        {
-            _wv.CoreWebView2.SourceChanged -= sourceHandler;
-        }
+        void Cleanup() => _wv.SourceChanged -= sourceHandler;
 
         sourceHandler = (_, _) =>
         {
-            var url = _wv.CoreWebView2.Source ?? "";
+            var url = _wv.Source ?? "";
             Logger.Log($"WebView2: source → {url}");
             bool isLoginPage = url.Contains("claude.ai/login")
-                           || url.Contains("claude.ai/auth")
-                           || url.Contains("claude.ai/sso-callback")
-                           || url.Contains("okta.com");
+                            || url.Contains("claude.ai/auth")
+                            || url.Contains("claude.ai/sso-callback")
+                            || url.Contains("okta.com");
             if (!isLoginPage && url.Contains("claude.ai"))
             {
                 Cleanup();
@@ -127,27 +129,27 @@ sealed class ClaudeWebScraper : IDisposable
                 tcs.TrySetResult(true);
             }
         };
+        _wv.SourceChanged += sourceHandler;
 
-        _wv.CoreWebView2.SourceChanged += sourceHandler;
         ShowLoginWindow();
-        _wv.CoreWebView2.Navigate("https://claude.ai/login");
+        _wv.Navigate("https://claude.ai/login");
 
-        _host.FormClosing += OnClose;
-        void OnClose(object? s, FormClosingEventArgs e)
+        EventHandler<WindowClosingEventArgs>? onClose = null;
+        onClose = (_, e) =>
         {
             e.Cancel = true;
             Logger.Log("WebView2: login window closed by user");
             Cleanup();
             HideWindow();
-            _host.FormClosing -= OnClose;
+            _host.Closing -= onClose;
             tcs.TrySetResult(false);
-        }
+        };
+        _host.Closing += onClose;
 
         var ok = await tcs.Task;
-        _host.FormClosing -= OnClose;
+        _host.Closing -= onClose;
 
         if (!ok) { Logger.Log("WebView2: login cancelled"); return null; }
-
         Logger.Log("WebView2: login completed");
         return await GetSessionKeyAsync();
     }
@@ -158,10 +160,8 @@ sealed class ClaudeWebScraper : IDisposable
     {
         try
         {
-            // Must be on a claude.ai page so fetch() runs in the correct origin
             await EnsureOnClaudeAsync();
 
-            // Step 1: get account + org UUIDs from /api/account
             var accountJson = await BrowserFetchAsync("https://claude.ai/api/account");
             if (accountJson == null) return null;
 
@@ -184,9 +184,8 @@ sealed class ClaudeWebScraper : IDisposable
             Logger.Log($"WebView2: orgUuid={orgUuid} accountUuid={accountUuid}");
             if (string.IsNullOrEmpty(orgUuid)) return null;
 
-            // Step 2: get usage
-            var qs       = accountUuid != null ? $"?account_uuid={accountUuid}" : "";
-            var usageUrl = $"https://claude.ai/api/organizations/{orgUuid}/overage_spend_limit{qs}";
+            var qs        = accountUuid != null ? $"?account_uuid={accountUuid}" : "";
+            var usageUrl  = $"https://claude.ai/api/organizations/{orgUuid}/overage_spend_limit{qs}";
             var usageJson = await BrowserFetchAsync(usageUrl);
             if (usageJson == null) return null;
             Logger.Log($"WebView2: usage: {usageJson[..Math.Min(300, usageJson.Length)]}");
@@ -197,8 +196,6 @@ sealed class ClaudeWebScraper : IDisposable
             var total = root.GetProperty("monthly_credit_limit").GetInt32();
             if (total <= 0) return null;
 
-            // Try API fields first; fall back to first day of next calendar month
-            // (Anthropic bills on the 1st, so the page computes it the same way)
             string? resetDate = null;
             foreach (var field in new[] { "billing_period_ends_at", "period_ends_at", "billing_period_end", "next_reset_at", "reset_at" })
             {
@@ -209,14 +206,9 @@ sealed class ClaudeWebScraper : IDisposable
                     break;
                 }
             }
-            if (resetDate == null)
-            {
-                var now   = DateTime.Now;
-                var first = new DateTime(now.Year, now.Month, 1).AddMonths(1);
-                resetDate = first.ToString("MMM d");
-            }
-            Logger.Log($"WebView2: resetDate={resetDate}");
+            resetDate ??= new DateTime(DateTime.Now.Year, DateTime.Now.Month, 1).AddMonths(1).ToString("MMM d");
 
+            Logger.Log($"WebView2: resetDate={resetDate}");
             return new UsageResult((int)Math.Round((double)used / total * 100), used, total, resetDate);
         }
         catch (Exception ex)
@@ -226,53 +218,40 @@ sealed class ClaudeWebScraper : IDisposable
         }
     }
 
-    /// <summary>
-    /// Navigates silently to claude.ai if the current page is not already there.
-    /// Required so that fetch() runs in the correct origin context (bypasses Cloudflare).
-    /// </summary>
     private async Task EnsureOnClaudeAsync()
     {
-        if (_wv.CoreWebView2.Source?.StartsWith("https://claude.ai") == true)
-            return;
+        if (_wv.Source?.StartsWith("https://claude.ai") == true) return;
 
         Logger.Log("WebView2: navigating to claude.ai for API context");
         var tcs = new TaskCompletionSource<bool>();
         EventHandler<CoreWebView2NavigationCompletedEventArgs>? h = null;
-        h = (_, _) => { _wv.CoreWebView2.NavigationCompleted -= h; tcs.TrySetResult(true); };
-        _wv.CoreWebView2.NavigationCompleted += h;
-        _wv.CoreWebView2.Navigate("https://claude.ai");
+        h = (_, _) => { _wv.NavigationCompleted -= h; tcs.TrySetResult(true); };
+        _wv.NavigationCompleted += h;
+        _wv.Navigate("https://claude.ai");
         await tcs.Task.WaitAsync(TimeSpan.FromSeconds(15));
-        Logger.Log($"WebView2: now on {_wv.CoreWebView2.Source}");
+        Logger.Log($"WebView2: now on {_wv.Source}");
     }
 
-    /// <summary>
-    /// Runs a GET fetch() inside the WebView2 Chromium engine and returns the response body.
-    /// Uses postMessage to bridge the async JS result back to C#.
-    /// This bypasses Cloudflare because the request originates from a real browser engine.
-    /// </summary>
     private async Task<string?> BrowserFetchAsync(string url)
     {
         try
         {
             var tcs = new TaskCompletionSource<string?>();
-
             EventHandler<CoreWebView2WebMessageReceivedEventArgs>? handler = null;
             handler = (_, args) =>
             {
-                _wv.CoreWebView2.WebMessageReceived -= handler;
+                _wv.WebMessageReceived -= handler;
                 try
                 {
-                    // ExecuteScriptAsync / postMessage wraps strings as JSON
                     var raw = JsonSerializer.Deserialize<string>(args.WebMessageAsJson);
                     tcs.TrySetResult(raw);
                 }
                 catch { tcs.TrySetResult(null); }
             };
-            _wv.CoreWebView2.WebMessageReceived += handler;
+            _wv.WebMessageReceived += handler;
 
-            // $$""" — JS braces are literal; only {{safeUrl}} is C# interpolation
             var safeUrl = url.Replace("'", "\\'");
-            await _wv.CoreWebView2.ExecuteScriptAsync($$"""
+            await _wv.ExecuteScriptAsync($$"""
                 fetch('{{safeUrl}}', { credentials: 'include', headers: { Accept: 'application/json' } })
                     .then(r => r.ok
                         ? r.text()
@@ -282,13 +261,11 @@ sealed class ClaudeWebScraper : IDisposable
                 """);
 
             var result = await tcs.Task.WaitAsync(TimeSpan.FromSeconds(20));
-
             if (result?.StartsWith("__ERR:") == true)
             {
                 Logger.Log($"WebView2: BrowserFetch error for {url}: {result}");
                 return null;
             }
-
             Logger.Log($"WebView2: BrowserFetch {url} → ok ({result?.Length ?? 0} chars)");
             return result;
         }
@@ -309,20 +286,18 @@ sealed class ClaudeWebScraper : IDisposable
     private void ShowLoginWindow()
     {
         Logger.Log("WebView2: showing login window");
-        _host.Text          = "Claude Cap — Sign in to claude.ai";
+        _host.Title         = "Claude Cap — Sign in to claude.ai";
         _host.ShowInTaskbar = true;
-        var wa = System.Windows.Forms.Screen.PrimaryScreen!.WorkingArea;
-        _host.Location = new System.Drawing.Point(
-            wa.X + (wa.Width  - _host.Width)  / 2,
-            wa.Y + (wa.Height - _host.Height) / 2);
+        _controller.Bounds    = new System.Drawing.Rectangle(0, 0, (int)_host.Width, (int)_host.Height);
+        _controller.IsVisible = true;
         _host.Show();
-        _host.BringToFront();
         _host.Activate();
     }
 
     private void HideWindow()
     {
-        _host.ShowInTaskbar = false;
+        _controller.IsVisible = false;
+        _host.ShowInTaskbar   = false;
         _host.Hide();
     }
 
@@ -332,8 +307,8 @@ sealed class ClaudeWebScraper : IDisposable
     {
         if (_ready)
         {
-            _wv.CoreWebView2.CookieManager.DeleteAllCookies();
-            Logger.Log("WebView2: session cookies cleared");
+            _wv.CookieManager.DeleteAllCookies();
+            Logger.Log("WebView2: cookies cleared");
         }
         else
         {
@@ -349,7 +324,7 @@ sealed class ClaudeWebScraper : IDisposable
 
     public void Dispose()
     {
-        _wv?.Dispose();
-        _host?.Dispose();
+        _controller?.Close();
+        _host?.Close();
     }
 }

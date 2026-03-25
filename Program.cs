@@ -1,356 +1,118 @@
+using Avalonia;
+using Avalonia.Controls;
+using Avalonia.Controls.ApplicationLifetimes;
+using Avalonia.Media.Imaging;
+using Avalonia.Themes.Fluent;
+using Avalonia.Threading;
 using Microsoft.Win32;
 using System.Text.Json;
 
 namespace ClaudeCap;
 
+// ── Entry point ───────────────────────────────────────────────────────────────
+
 static class Program
 {
-    private enum TrayState { Loading, Connecting, Ok, Error }
+    [STAThread]
+    public static void Main(string[] args) =>
+        AppBuilder.Configure<App>()
+            .UsePlatformDetect()
+            .StartWithClassicDesktopLifetime(args, ShutdownMode.OnExplicitShutdown);
+}
 
-    private static NotifyIcon?                   _trayIcon;
-    private static System.Windows.Forms.Timer?   _timer;
-    private static System.Windows.Forms.Timer?   _blinkTimer;
-    private static bool                          _blinkOn = true;
-    private static AppConfig                     _config  = new();
-    private static int?                          _usagePercent;
-    private static DateTime?                     _lastUpdated;
-    private static ToolStripMenuItem?            _intervalMenu;
-    private static int                           _lastNotifiedThreshold = 0;
+// ── Avalonia Application ──────────────────────────────────────────────────────
+
+class App : Application
+{
+    public override void Initialize() => Styles.Add(new FluentTheme());
+
+    public override void OnFrameworkInitializationCompleted()
+    {
+        if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
+            TrayApp.Start(desktop);
+        base.OnFrameworkInitializationCompleted();
+    }
+}
+
+// ── Tray application logic ────────────────────────────────────────────────────
+
+static class TrayApp
+{
+    private static TrayIcon?         _tray;
+    private static NativeMenuItem?   _statusItem;
+    private static NativeMenuItem?   _intervalMenu;
+    private static DispatcherTimer?  _timer;
+    private static DispatcherTimer?  _blinkTimer;
+    private static bool              _blinkOn  = true;
+    private static AppConfig         _config   = new();
+    private static int?              _usagePercent;
+    private static DateTime?         _lastUpdated;
+    private static int               _lastNotifiedThreshold = 0;
+    private static UsageGraphWindow? _graphWindow;
 
     private static readonly string OutputFile = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
         ".claude", "usage_data.json");
 
-    private const string AppName      = "ClaudeCap";
+    private const string AppName       = "ClaudeCap";
     private const string StartupRegKey = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
 
-    private static Icon _capIcon        = LoadCapIcon();
-    private static Icon _capIconError   = TintCapIcon(System.Drawing.Color.FromArgb(210, 45, 45));
-    private static Icon _capIconDim     = TintCapIcon(System.Drawing.Color.FromArgb(90, 90, 90));
-    private static Icon _capIconOrange  = TintCapIcon(System.Drawing.Color.FromArgb(220, 120, 20));
-    private static Icon _capIconMaxed   = TintCapIcon(System.Drawing.Color.FromArgb(180, 0, 0));
+    private static WindowIcon _iconNormal = null!;
+    private static WindowIcon _iconError  = null!;
+    private static WindowIcon _iconDim    = null!;
+    private static WindowIcon _iconOrange = null!;
+    private static WindowIcon _iconMaxed  = null!;
 
-    [STAThread]
-    static void Main()
+    // ── Start ─────────────────────────────────────────────────────────────────
+
+    public static void Start(IClassicDesktopStyleApplicationLifetime desktop)
     {
-        Application.EnableVisualStyles();
-        Application.SetCompatibleTextRenderingDefault(false);
-
         Logger.Clear();
-        Logger.Log("=== ClaudeCap starting ===");
+        Logger.Log("=== ClaudeCap starting (Avalonia) ===");
 
         var mutex = new System.Threading.Mutex(true, AppName, out bool isNew);
         if (!isNew)
         {
-            MessageBox.Show("Claude Cap is already running.", AppName,
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            Logger.Log("Already running — exiting");
+            desktop.Shutdown();
             return;
         }
 
         _config = AppConfig.Load();
         Logger.Log($"Config: RefreshInterval={_config.RefreshIntervalMinutes} min");
         SelfInstall();
-
-        BuildTrayIcon();
+        LoadIcons();
+        BuildTray();
         StartTimer();
         _ = RefreshAsync();
-
-        Application.Run();
-        mutex.ReleaseMutex();
     }
 
-    // ── Tray icon setup ───────────────────────────────────────────────────────
+    // ── Icons ─────────────────────────────────────────────────────────────────
 
-    static void BuildTrayIcon()
+    static void LoadIcons()
     {
-        var menu = new ContextMenuStrip();
-        menu.Items.Add("Refresh now", null, async (_, _) => await RefreshAsync());
-        _intervalMenu = BuildIntervalMenu();
-        menu.Items.Add(_intervalMenu);
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("Open claude.ai/usage", null, (_, _) => OpenUsagePage());
-        menu.Items.Add("View usage trend…", null, (_, _) => ShowUsageGraph());
-        menu.Items.Add(new ToolStripSeparator());
-
-        var startupItem = new ToolStripMenuItem("Launch on Startup") { CheckOnClick = true };
-        startupItem.Checked = IsStartupEnabled();
-        startupItem.CheckedChanged += (_, _) => SetStartup(startupItem.Checked);
-        menu.Items.Add(startupItem);
-
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("Sign out from claude.ai…", null, (_, _) =>
-        {
-            ClaudeWebScraper.Instance.ClearSession();
-            Logger.Log("Session cleared by user");
-            _ = RefreshAsync();
-        });
-        menu.Items.Add("View Logs", null, (_, _) => Logger.Open());
-        menu.Items.Add("Exit", null, (_, _) => ExitApp());
-
-        _trayIcon = new NotifyIcon
-        {
-            Icon             = _capIcon,
-            Text             = "Claude Cap — loading…",
-            ContextMenuStrip = menu,
-            Visible          = true,
-        };
-
-        _trayIcon.DoubleClick += (_, _) => OpenUsagePage();
-    }
-
-    static ToolStripMenuItem BuildIntervalMenu()
-    {
-        var sub = new ToolStripMenuItem("Refresh every");
-        foreach (var mins in new[] { 1, 2, 5, 10, 15, 30 })
-        {
-            var label = mins == 1 ? "1 minute" : $"{mins} minutes";
-            var item  = new ToolStripMenuItem(label) { Tag = mins, Checked = mins == _config.RefreshIntervalMinutes };
-            item.Click += OnIntervalClick;
-            sub.DropDownItems.Add(item);
-        }
-        return sub;
-    }
-
-    static void OnIntervalClick(object? sender, EventArgs e)
-    {
-        if (sender is not ToolStripMenuItem item || item.Tag is not int mins) return;
-        _config.RefreshIntervalMinutes = mins;
-        _config.Save();
-        _timer!.Interval = mins * 60 * 1000;
-        Logger.Log($"Interval changed to {mins} min");
-        RefreshIntervalCheckmarks();
-    }
-
-    static void RefreshIntervalCheckmarks()
-    {
-        if (_intervalMenu == null) return;
-        foreach (ToolStripMenuItem item in _intervalMenu.DropDownItems)
-            item.Checked = (int)item.Tag! == _config.RefreshIntervalMinutes;
-    }
-
-    // ── Refresh loop ──────────────────────────────────────────────────────────
-
-    static void StartTimer()
-    {
-        _timer = new System.Windows.Forms.Timer
-        {
-            Interval = _config.RefreshIntervalMinutes * 60 * 1000
-        };
-        _timer.Tick += async (_, _) => await RefreshAsync();
-        _timer.Start();
-        Logger.Log($"Timer: refresh every {_config.RefreshIntervalMinutes} min");
-    }
-
-    static async Task RefreshAsync()
-    {
-        Logger.Log("--- RefreshAsync ---");
-        StartBlink();
-
-        var result = await ClaudeWebScraper.Instance.FetchAsync();
-
-        StopBlink();
-
-        if (result == null)
-        {
-            Logger.Log("RefreshAsync: fetch returned null");
-            SetTray(_capIconError, "Claude Cap: could not retrieve usage data.");
-            if (_trayIcon != null)
-                _trayIcon.ShowBalloonTip(5000, "Claude Cap",
-                    "Could not retrieve usage data.", ToolTipIcon.Error);
-            return;
-        }
-
-        Logger.Log($"RefreshAsync: {result.Percent}% ({result.UsedCredits}/{result.TotalCredits})");
-
-        if (_trayIcon?.ContextMenuStrip?.InvokeRequired == true)
-            _trayIcon.ContextMenuStrip.Invoke(() => UpdateDisplay(result));
-        else
-            UpdateDisplay(result);
-    }
-
-    static void UpdateDisplay(ClaudeWebScraper.UsageResult result)
-    {
-        _usagePercent = result.Percent;
-        _lastUpdated  = DateTime.Now;
-
-        // Credits are in 1/100,000 of a dollar (25,000,000 credits = $250)
-        double usedDollars  = result.UsedCredits  / 100.0;
-        double totalDollars = result.TotalCredits / 100.0;
-
-        File.WriteAllText(OutputFile, JsonSerializer.Serialize(new
-        {
-            percent     = result.Percent,
-            used        = result.UsedCredits,
-            total       = result.TotalCredits,
-            used_dollars  = Math.Round(usedDollars,  2),
-            total_dollars = Math.Round(totalDollars, 2),
-            reset       = result.ResetDate,
-        }));
-
-        UsageHistory.Record(usedDollars, totalDollars, result.Percent);
-
-        var resetLine = result.ResetDate != null ? $"\nResets: {result.ResetDate}" : "";
-        var icon = result.Percent >= 100 ? _capIconMaxed
-                 : result.Percent >= 90  ? _capIconOrange
-                 : _capIcon;
-        SetTray(icon,
-            $"Claude Plan: {result.Percent}% used\n" +
-            $"${usedDollars:F2} of ${totalDollars:F2} spent{resetLine}\n" +
-            $"Updated: {_lastUpdated:HH:mm:ss}");
-
-        int threshold = result.Percent >= 100 ? 100 : result.Percent >= 90 ? 90 : result.Percent >= 80 ? 80 : 0;
-        if (threshold > _lastNotifiedThreshold)
-        {
-            _lastNotifiedThreshold = threshold;
-            if (threshold >= 100)
-                _trayIcon!.ShowBalloonTip(5000, "Claude Cap",
-                    $"Plan limit reached! ({result.Percent}%)", ToolTipIcon.Error);
-            else if (threshold >= 90)
-                _trayIcon!.ShowBalloonTip(4000, "Claude Cap",
-                    $"⚠️ {result.Percent}% of plan used!", ToolTipIcon.Warning);
-            else
-                _trayIcon!.ShowBalloonTip(3000, "Claude Cap",
-                    $"{result.Percent}% of plan used.", ToolTipIcon.Info);
-        }
-    }
-
-    // ── Blink (connecting state) ───────────────────────────────────────────────
-
-    static void StartBlink()
-    {
-        void Apply()
-        {
-            if (_blinkTimer != null) return;
-            _blinkOn    = true;
-            _blinkTimer = new System.Windows.Forms.Timer { Interval = 550 };
-            _blinkTimer.Tick += (_, _) =>
-            {
-                _blinkOn = !_blinkOn;
-                if (_trayIcon != null)
-                    _trayIcon.Icon = _blinkOn ? _capIcon : _capIconDim;
-            };
-            _blinkTimer.Start();
-            if (_trayIcon != null)
-            {
-                _trayIcon.Icon = _capIcon;
-                _trayIcon.Text = "Claude Cap — connecting…";
-            }
-        }
-
-        if (_trayIcon?.ContextMenuStrip?.InvokeRequired == true)
-            _trayIcon.ContextMenuStrip.Invoke(Apply);
-        else
-            Apply();
-    }
-
-    static void StopBlink()
-    {
-        void Apply()
-        {
-            _blinkTimer?.Stop();
-            _blinkTimer?.Dispose();
-            _blinkTimer = null;
-        }
-
-        if (_trayIcon?.ContextMenuStrip?.InvokeRequired == true)
-            _trayIcon.ContextMenuStrip.Invoke(Apply);
-        else
-            Apply();
-    }
-
-    static void SetTray(Icon icon, string tooltip)
-    {
-        void Apply()
-        {
-            if (_trayIcon == null) return;
-            _trayIcon.Icon = icon;
-            _trayIcon.Text = tooltip[..Math.Min(127, tooltip.Length)];
-        }
-
-        if (_trayIcon?.ContextMenuStrip?.InvokeRequired == true)
-            _trayIcon.ContextMenuStrip.Invoke(Apply);
-        else
-            Apply();
-    }
-
-    // ── Helpers ───────────────────────────────────────────────────────────────
-
-    static void SelfInstall()
-    {
-        var claudeDir     = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude");
-        var scriptDest    = Path.Combine(claudeDir, "statusline-command.sh");
-        var settingsPath  = Path.Combine(claudeDir, "settings.json");
-
-        Directory.CreateDirectory(claudeDir);
-
-        // Write statusline script if not already present
-        if (!File.Exists(scriptDest))
-        {
-            try
-            {
-                using var stream = typeof(Program).Assembly
-                    .GetManifestResourceStream("ClaudeCap.statusline-command.sh")!;
-                using var reader = new System.IO.StreamReader(stream);
-                var content = reader.ReadToEnd().Replace("\r\n", "\n"); // ensure LF line endings
-                File.WriteAllText(scriptDest, content, new System.Text.UTF8Encoding(false));
-                Logger.Log($"SelfInstall: wrote {scriptDest}");
-            }
-            catch (Exception ex) { Logger.Log($"SelfInstall: failed to write script: {ex.Message}"); }
-        }
-
-        // Patch settings.json to register the statusLine command if not already set
-        try
-        {
-            System.Text.Json.Nodes.JsonObject root;
-            if (File.Exists(settingsPath))
-            {
-                root = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(settingsPath))!
-                           .AsObject();
-            }
-            else
-            {
-                root = new System.Text.Json.Nodes.JsonObject();
-            }
-
-            if (!root.ContainsKey("statusLine"))
-            {
-                root["statusLine"] = System.Text.Json.Nodes.JsonNode.Parse(
-                    """{"type":"command","command":"bash ~/.claude/statusline-command.sh"}""");
-                File.WriteAllText(settingsPath,
-                    root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
-                Logger.Log($"SelfInstall: registered statusLine in {settingsPath}");
-            }
-        }
-        catch (Exception ex) { Logger.Log($"SelfInstall: failed to patch settings.json: {ex.Message}"); }
-
-        // Auto-repair startup registry if enabled but pointing to wrong path
-        try
-        {
-            using var key = Registry.CurrentUser.OpenSubKey(StartupRegKey, true);
-            if (key != null)
-            {
-                var current = key.GetValue(AppName) as string;
-                var expected = $"\"{Environment.ProcessPath}\"";
-                if (current != null && current != expected)
-                {
-                    key.SetValue(AppName, expected);
-                    Logger.Log($"SelfInstall: updated startup path from {current} to {expected}");
-                }
-            }
-        }
-        catch (Exception ex) { Logger.Log($"SelfInstall: failed to update startup registry: {ex.Message}"); }
-    }
-
-    static Icon LoadCapIcon()
-    {
-        var stream = typeof(Program).Assembly
+        using var stream = typeof(TrayApp).Assembly
             .GetManifestResourceStream("ClaudeCap.icon.ico")!;
-        return new Icon(stream, new System.Drawing.Size(16, 16));
+        using var baseIco = new System.Drawing.Icon(stream, 16, 16);
+        using var baseBmp = baseIco.ToBitmap();
+
+        _iconNormal = BitmapToWindowIcon(baseBmp);
+        _iconError  = TintWindowIcon(baseBmp, System.Drawing.Color.FromArgb(210,  45,  45));
+        _iconDim    = TintWindowIcon(baseBmp, System.Drawing.Color.FromArgb( 90,  90,  90));
+        _iconOrange = TintWindowIcon(baseBmp, System.Drawing.Color.FromArgb(220, 120,  20));
+        _iconMaxed  = TintWindowIcon(baseBmp, System.Drawing.Color.FromArgb(180,   0,   0));
     }
 
-    static Icon TintCapIcon(System.Drawing.Color tint)
+    static WindowIcon BitmapToWindowIcon(System.Drawing.Bitmap bmp)
     {
-        using var src = _capIcon.ToBitmap();
+        using var ms = new MemoryStream();
+        bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+        ms.Position = 0;
+        return new WindowIcon(ms);
+    }
+
+    static WindowIcon TintWindowIcon(System.Drawing.Bitmap src, System.Drawing.Color tint)
+    {
         var dst = new System.Drawing.Bitmap(src.Width, src.Height,
             System.Drawing.Imaging.PixelFormat.Format32bppArgb);
         for (int y = 0; y < src.Height; y++)
@@ -365,7 +127,277 @@ static class Program
                 (int)(lum * tint.G),
                 (int)(lum * tint.B)));
         }
-        return Icon.FromHandle(dst.GetHicon());
+        var result = BitmapToWindowIcon(dst);
+        dst.Dispose();
+        return result;
+    }
+
+    // ── Tray icon ─────────────────────────────────────────────────────────────
+
+    static void BuildTray()
+    {
+        var menu = new NativeMenu();
+
+        _statusItem = new NativeMenuItem("Claude Cap — loading…") { IsEnabled = false };
+        menu.Items.Add(_statusItem);
+        menu.Items.Add(new NativeMenuItemSeparator());
+
+        var refreshItem = new NativeMenuItem("Refresh now");
+        refreshItem.Click += (_, _) => _ = RefreshAsync();
+        menu.Items.Add(refreshItem);
+
+        _intervalMenu = new NativeMenuItem("Refresh every") { Menu = BuildIntervalMenu() };
+        menu.Items.Add(_intervalMenu);
+
+        menu.Items.Add(new NativeMenuItemSeparator());
+
+        var usageItem = new NativeMenuItem("Open claude.ai/usage");
+        usageItem.Click += (_, _) => OpenUsagePage();
+        menu.Items.Add(usageItem);
+
+        var graphItem = new NativeMenuItem("View usage trend…");
+        graphItem.Click += (_, _) => ShowUsageGraph();
+        menu.Items.Add(graphItem);
+
+        menu.Items.Add(new NativeMenuItemSeparator());
+
+        static string StartupLabel(bool on) => on ? "Launch on Startup  ✓" : "Launch on Startup";
+        var startupItem = new NativeMenuItem(StartupLabel(IsStartupEnabled()));
+        startupItem.Click += (_, _) =>
+        {
+            var enable = startupItem.Header == StartupLabel(false);
+            SetStartup(enable);
+            startupItem.Header = StartupLabel(enable);
+        };
+        menu.Items.Add(startupItem);
+
+        menu.Items.Add(new NativeMenuItemSeparator());
+
+        var signOutItem = new NativeMenuItem("Sign out from claude.ai…");
+        signOutItem.Click += (_, _) =>
+        {
+            ClaudeWebScraper.Instance.ClearSession();
+            Logger.Log("Session cleared");
+            _ = RefreshAsync();
+        };
+        menu.Items.Add(signOutItem);
+
+        var logsItem = new NativeMenuItem("View Logs");
+        logsItem.Click += (_, _) => Logger.Open();
+        menu.Items.Add(logsItem);
+
+        menu.Items.Add(new NativeMenuItemSeparator());
+
+        var exitItem = new NativeMenuItem("Exit");
+        exitItem.Click += (_, _) => ExitApp();
+        menu.Items.Add(exitItem);
+
+        _tray = new TrayIcon
+        {
+            Icon        = _iconNormal,
+            ToolTipText = "Claude Cap — loading…",
+            Menu        = menu,
+            IsVisible   = true,
+        };
+    }
+
+    static NativeMenu BuildIntervalMenu()
+    {
+        var sub = new NativeMenu();
+        foreach (var mins in new[] { 1, 2, 5, 10, 15, 30 })
+        {
+            var label = mins == 1 ? "1 minute" : $"{mins} minutes";
+            var item  = new NativeMenuItem(label)
+            {
+                IsChecked = mins == _config.RefreshIntervalMinutes,
+            };
+            item.Click += (_, _) => OnIntervalClick(mins);
+            sub.Items.Add(item);
+        }
+        return sub;
+    }
+
+    static void OnIntervalClick(int mins)
+    {
+        _config.RefreshIntervalMinutes = mins;
+        _config.Save();
+        if (_timer != null) _timer.Interval = TimeSpan.FromMinutes(mins);
+        Logger.Log($"Interval changed to {mins} min");
+        RefreshIntervalCheckmarks();
+    }
+
+    static void RefreshIntervalCheckmarks()
+    {
+        if (_intervalMenu?.Menu == null) return;
+        foreach (var it in _intervalMenu.Menu.Items.OfType<NativeMenuItem>())
+        {
+            var parts = it.Header?.Split(' ');
+            if (parts?.Length > 0 && int.TryParse(parts[0], out int n))
+                it.IsChecked = n == _config.RefreshIntervalMinutes;
+        }
+    }
+
+    // ── Refresh loop ──────────────────────────────────────────────────────────
+
+    static void StartTimer()
+    {
+        _timer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(_config.RefreshIntervalMinutes) };
+        _timer.Tick += async (_, _) => await RefreshAsync();
+        _timer.Start();
+        Logger.Log($"Timer: refresh every {_config.RefreshIntervalMinutes} min");
+    }
+
+    static async Task RefreshAsync()
+    {
+        Logger.Log("--- RefreshAsync ---");
+        StartBlink();
+        var result = await ClaudeWebScraper.Instance.FetchAsync();
+        StopBlink();
+
+        if (result == null)
+        {
+            Logger.Log("RefreshAsync: fetch returned null");
+            SetTray(_iconError, "Claude Cap: could not retrieve usage data.");
+            return;
+        }
+
+        Logger.Log($"RefreshAsync: {result.Percent}% ({result.UsedCredits}/{result.TotalCredits})");
+        UpdateDisplay(result);
+    }
+
+    static void UpdateDisplay(ClaudeWebScraper.UsageResult result)
+    {
+        _usagePercent = result.Percent;
+        _lastUpdated  = DateTime.Now;
+
+        double usedDollars  = result.UsedCredits  / 100.0;
+        double totalDollars = result.TotalCredits / 100.0;
+
+        File.WriteAllText(OutputFile, JsonSerializer.Serialize(new
+        {
+            percent       = result.Percent,
+            used          = result.UsedCredits,
+            total         = result.TotalCredits,
+            used_dollars  = Math.Round(usedDollars,  2),
+            total_dollars = Math.Round(totalDollars, 2),
+            reset         = result.ResetDate,
+        }));
+
+        UsageHistory.Record(usedDollars, totalDollars, result.Percent);
+
+        if (_statusItem != null)
+            _statusItem.Header = $"${usedDollars:F2} / ${totalDollars:F2} · {result.Percent}%";
+
+        var resetLine = result.ResetDate != null ? $"\nResets: {result.ResetDate}" : "";
+        var icon = result.Percent >= 100 ? _iconMaxed
+                 : result.Percent >= 90  ? _iconOrange
+                 : _iconNormal;
+
+        SetTray(icon,
+            $"Claude Plan: {result.Percent}% used\n" +
+            $"${usedDollars:F2} of ${totalDollars:F2} spent{resetLine}\n" +
+            $"Updated: {_lastUpdated:HH:mm:ss}");
+
+        int threshold = result.Percent >= 100 ? 100 : result.Percent >= 90 ? 90 : result.Percent >= 80 ? 80 : 0;
+        if (threshold > _lastNotifiedThreshold)
+        {
+            _lastNotifiedThreshold = threshold;
+            Logger.Log($"Threshold reached: {threshold}%");
+            // TODO: add system notifications in a future PR
+        }
+    }
+
+    // ── Blink ─────────────────────────────────────────────────────────────────
+
+    static void StartBlink()
+    {
+        if (_blinkTimer != null) return;
+        _blinkOn    = true;
+        _blinkTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(550) };
+        _blinkTimer.Tick += (_, _) =>
+        {
+            _blinkOn = !_blinkOn;
+            if (_tray != null) _tray.Icon = _blinkOn ? _iconNormal : _iconDim;
+        };
+        _blinkTimer.Start();
+        if (_tray != null)
+        {
+            _tray.Icon        = _iconNormal;
+            _tray.ToolTipText = "Claude Cap — connecting…";
+        }
+    }
+
+    static void StopBlink()
+    {
+        _blinkTimer?.Stop();
+        _blinkTimer = null;
+    }
+
+    static void SetTray(WindowIcon icon, string tooltip)
+    {
+        if (_tray == null) return;
+        _tray.Icon        = icon;
+        _tray.ToolTipText = tooltip[..Math.Min(127, tooltip.Length)];
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    static void SelfInstall()
+    {
+        var claudeDir    = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude");
+        var scriptDest   = Path.Combine(claudeDir, "statusline-command.sh");
+        var settingsPath = Path.Combine(claudeDir, "settings.json");
+
+        Directory.CreateDirectory(claudeDir);
+
+        if (!File.Exists(scriptDest))
+        {
+            try
+            {
+                using var stream = typeof(TrayApp).Assembly
+                    .GetManifestResourceStream("ClaudeCap.statusline-command.sh")!;
+                using var reader = new System.IO.StreamReader(stream);
+                var content = reader.ReadToEnd().Replace("\r\n", "\n");
+                File.WriteAllText(scriptDest, content, new System.Text.UTF8Encoding(false));
+                Logger.Log($"SelfInstall: wrote {scriptDest}");
+            }
+            catch (Exception ex) { Logger.Log($"SelfInstall: script error: {ex.Message}"); }
+        }
+
+        try
+        {
+            System.Text.Json.Nodes.JsonObject root;
+            if (File.Exists(settingsPath))
+                root = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(settingsPath))!.AsObject();
+            else
+                root = new System.Text.Json.Nodes.JsonObject();
+
+            if (!root.ContainsKey("statusLine"))
+            {
+                root["statusLine"] = System.Text.Json.Nodes.JsonNode.Parse(
+                    """{"type":"command","command":"bash ~/.claude/statusline-command.sh"}""");
+                File.WriteAllText(settingsPath,
+                    root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+                Logger.Log("SelfInstall: registered statusLine");
+            }
+        }
+        catch (Exception ex) { Logger.Log($"SelfInstall: settings error: {ex.Message}"); }
+
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(StartupRegKey, true);
+            if (key != null)
+            {
+                var current  = key.GetValue(AppName) as string;
+                var expected = $"\"{Environment.ProcessPath}\"";
+                if (current != null && current != expected)
+                {
+                    key.SetValue(AppName, expected);
+                    Logger.Log("SelfInstall: updated startup path");
+                }
+            }
+        }
+        catch (Exception ex) { Logger.Log($"SelfInstall: registry error: {ex.Message}"); }
     }
 
     static void OpenUsagePage() =>
@@ -375,17 +407,16 @@ static class Program
             UseShellExecute = true,
         });
 
-    static UsageGraphForm? _graphForm;
     static void ShowUsageGraph()
     {
-        if (_graphForm != null && !_graphForm.IsDisposed) { _graphForm.Activate(); return; }
+        if (_graphWindow != null && _graphWindow.IsVisible) { _graphWindow.Activate(); return; }
         var history      = UsageHistory.Load();
         var totalDollars = File.Exists(OutputFile)
             ? (JsonSerializer.Deserialize<JsonElement>(File.ReadAllText(OutputFile))
                 .TryGetProperty("total_dollars", out var v) ? v.GetDouble() : 250)
             : 250;
-        _graphForm = new UsageGraphForm(history, totalDollars);
-        _graphForm.Show();
+        _graphWindow = new UsageGraphWindow(history, totalDollars);
+        _graphWindow.Show();
     }
 
     static bool IsStartupEnabled()
@@ -397,19 +428,17 @@ static class Program
     static void SetStartup(bool enable)
     {
         using var key = Registry.CurrentUser.OpenSubKey(StartupRegKey, true)!;
-        if (enable)
-            key.SetValue(AppName, $"\"{Environment.ProcessPath}\"");
-        else
-            key.DeleteValue(AppName, false);
+        if (enable) key.SetValue(AppName, $"\"{Environment.ProcessPath}\"");
+        else        key.DeleteValue(AppName, false);
     }
 
     static void ExitApp()
     {
         StopBlink();
         _timer?.Stop();
-        _trayIcon!.Visible = false;
-        _trayIcon.Dispose();
+        if (_tray != null) _tray.IsVisible = false;
         ClaudeWebScraper.Instance.Dispose();
-        Application.Exit();
+        if (Application.Current?.ApplicationLifetime is IClassicDesktopStyleApplicationLifetime lt)
+            lt.Shutdown();
     }
 }
