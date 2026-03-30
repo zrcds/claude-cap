@@ -167,14 +167,15 @@ class ChartControl : Control
             {
                 double slope     = (n * sumXY - sumX * sumY) / denom;
                 double intercept = (sumY - slope * sumX) / n;
-                double trendEndX = (endDate - firstDate).TotalDays;
-                double trendEndY = slope * trendEndX + intercept;
+                double trendStartY = pts[^1].UsedDollars;
+                double trendEndX   = (endDate - firstDate).TotalDays;
+                double trendEndY   = trendStartY + slope * (trendEndX - (pts[^1].Date - firstDate).TotalDays);
 
                 var trendPen = new Pen(
                     new SolidColorBrush(Color.FromArgb(200, 255, 165, 0)), 1.5,
                     new DashStyle(new double[] { 4, 2 }, 0));
                 ctx.DrawLine(trendPen,
-                    ToScreen(pts[^1].Date, slope * (pts[^1].Date - firstDate).TotalDays + intercept),
+                    ToScreen(pts[^1].Date, trendStartY),
                     ToScreen(endDate, Math.Min(trendEndY, maxY)));
 
                 if (slope > 0 && trendEndY >= _totalDollars)

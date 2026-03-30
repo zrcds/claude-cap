@@ -159,9 +159,9 @@ class UsageGraphForm : Form
                 double intercept = (sumY - slope * sumX) / n;
 
                 double trendStartX = (pts[^1].Date - firstDate).TotalDays;
-                double trendStartY = slope * trendStartX + intercept;
+                double trendStartY = pts[^1].UsedDollars;
                 double trendEndX   = (endDate - firstDate).TotalDays;
-                double trendEndY   = slope * trendEndX + intercept;
+                double trendEndY   = trendStartY + slope * (trendEndX - trendStartX);
 
                 var trendPt1 = ToScreen(pts[^1].Date, trendStartY);
                 var trendPt2 = ToScreen(endDate, Math.Min(trendEndY, maxY));
