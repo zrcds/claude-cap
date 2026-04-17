@@ -53,7 +53,8 @@ class ChartControl : Control
         ctx.DrawText(titleFt, new Point(w / 2 - titleFt.Width / 2, 13));
 
         // ── No data ───────────────────────────────────────────────────────────
-        if (_history.Count == 0)
+        var today = DateTime.Today;
+        if (!_history.Any(d => { var dt = DateTime.Parse(d.Timestamp); return dt.Year == today.Year && dt.Month == today.Month; }))
         {
             var noDataFt = new FormattedText(
                 "No history yet.\nData will appear after the next fetch.",
@@ -65,9 +66,8 @@ class ChartControl : Control
         const double padL = 64, padR = 24, padT = 42, padB = 56;
         var chart = new Rect(padL, padT, w - padL - padR, h - padT - padB);
 
-        // ── Date range ────────────────────────────────────────────────────────
-        var today     = DateTime.Today;
-        var firstDate = DateTime.Parse(_history.Min(d => d.Timestamp)).Date;
+        // ── Date range — current month only ──────────────────────────────────
+        var firstDate = new DateTime(today.Year, today.Month, 1);
         var endDate   = new DateTime(today.Year, today.Month, DateTime.DaysInMonth(today.Year, today.Month));
         int totalDays = Math.Max((endDate - firstDate).Days + 1, 2);
         double maxY   = _totalDollars * 1.08;
@@ -104,9 +104,10 @@ class ChartControl : Control
             new SolidColorBrush(Colors.OrangeRed));
         ctx.DrawText(limitLabelFt, new Point(chart.Right - limitLabelFt.Width, limitY + 2));
 
-        // ── Data points ───────────────────────────────────────────────────────
+        // ── Data points — current month only ─────────────────────────────────
         var pts = _history
             .Select(d => new { Date = DateTime.Parse(d.Timestamp), d.UsedDollars })
+            .Where(d => d.Date.Year == today.Year && d.Date.Month == today.Month)
             .OrderBy(d => d.Date)
             .ToList();
 
