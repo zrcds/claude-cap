@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 #if WINDOWS
 using Avalonia.Controls;
@@ -27,6 +28,9 @@ sealed class ClaudeWebScraper : IDisposable
         ".claude", "tools", "claudecap", "webview2");
 
     private bool _ready;
+    private bool _fetchInProgress;
+
+    public static event Action<string>? StatusUpdate;
 
 #if WINDOWS
     private Window                   _host       = null!;
@@ -114,21 +118,40 @@ sealed class ClaudeWebScraper : IDisposable
 
     public async Task<UsageResult?> FetchAsync()
     {
-        await EnsureInitAsync();
-        Logger.Log("Scraper: FetchAsync");
-
-        // Try existing session first
-        if (await GetSessionKeyAsync() != null)
+        if (_fetchInProgress) { Logger.Log("FetchAsync: already in progress"); return null; }
+        _fetchInProgress = true;
+        try
         {
-            var result = await GetUsageAsync();
-            if (result != null) return result;
-            Logger.Log("Scraper: session present but API failed — re-authenticating");
+            await EnsureInitAsync();
+            Logger.Log("Scraper: FetchAsync");
+
+            // Try existing WebView2 session
+            if (await GetSessionKeyAsync() != null)
+            {
+                var result = await GetUsageAsync();
+                if (result != null) return result;
+                Logger.Log("Scraper: session present but API failed — re-authenticating");
+            }
+
+            // Try silent import from system browser (user likely already signed in)
+            var browserKey = BrowserCookieReader.TryGetSessionKey();
+            if (browserKey != null)
+            {
+                Logger.Log("Scraper: found session key in system browser — importing silently");
+                ImportCookie("sessionKey", browserKey, "claude.ai");
+                var result = await GetUsageAsync();
+                if (result != null) return result;
+                Logger.Log("Scraper: imported browser session but API still failed");
+            }
+
+            var key = await LoginAsync();
+            if (key == null) return null;
+            return await GetUsageAsync();
         }
-
-        var key = await LoginAsync();
-        if (key == null) return null;
-
-        return await GetUsageAsync();
+        finally
+        {
+            _fetchInProgress = false;
+        }
     }
 
     // ── Session check ─────────────────────────────────────────────────────────
@@ -166,7 +189,76 @@ sealed class ClaudeWebScraper : IDisposable
 
     private async Task<string?> LoginAsync()
     {
-        Logger.Log("Scraper: starting login flow");
+        Logger.Log("Scraper: opening browser for login");
+        LaunchBrowserAppMode("https://claude.ai/login");
+        StatusUpdate?.Invoke("Sign in to claude.ai in the browser that just opened…");
+
+        var deadline = DateTime.Now.AddMinutes(5);
+        while (DateTime.Now < deadline)
+        {
+            await Task.Delay(2000);
+            var key = BrowserCookieReader.TryGetSessionKey();
+            if (key != null)
+            {
+                Logger.Log("Scraper: received session key from browser");
+                ImportCookie("sessionKey", key, "claude.ai");
+                return key;
+            }
+        }
+
+        Logger.Log("Scraper: browser login timed out — falling back to embedded login");
+        return await LoginViaWebViewAsync();
+    }
+
+    private static void LaunchBrowserAppMode(string url)
+    {
+#if WINDOWS
+        var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var pf    = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        var pf86  = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+        string[] candidates =
+        [
+            Path.Combine(local, "Google", "Chrome", "Application", "chrome.exe"),
+            Path.Combine(pf,   "Google", "Chrome", "Application", "chrome.exe"),
+            Path.Combine(pf86, "Google", "Chrome", "Application", "chrome.exe"),
+            Path.Combine(local, "Microsoft", "Edge", "Application", "msedge.exe"),
+            Path.Combine(pf,   "Microsoft", "Edge", "Application", "msedge.exe"),
+            Path.Combine(pf86, "Microsoft", "Edge", "Application", "msedge.exe"),
+        ];
+        foreach (var exe in candidates)
+        {
+            if (!File.Exists(exe)) continue;
+            try
+            {
+                Process.Start(new ProcessStartInfo { FileName = exe, Arguments = $"--app=\"{url}\"" });
+                Logger.Log($"LaunchBrowserAppMode: {exe}");
+                return;
+            }
+            catch (Exception ex) { Logger.Log($"LaunchBrowserAppMode: {exe}: {ex.Message}"); }
+        }
+#endif
+        try
+        {
+            Process.Start(new ProcessStartInfo { FileName = url, UseShellExecute = true });
+            Logger.Log("LaunchBrowserAppMode: default browser fallback");
+        }
+        catch (Exception ex) { Logger.Log($"LaunchBrowserAppMode: fallback failed: {ex.Message}"); }
+    }
+
+    private void ImportCookie(string name, string value, string domain)
+    {
+#if WINDOWS
+        var cookie = _wv.CookieManager.CreateCookie(name, value, domain, "/");
+        cookie.IsHttpOnly = true;
+        cookie.IsSecure   = true;
+        _wv.CookieManager.AddOrUpdateCookie(cookie);
+        Logger.Log($"Scraper: imported {name} for {domain}");
+#endif
+    }
+
+    private async Task<string?> LoginViaWebViewAsync()
+    {
+        Logger.Log("Scraper: starting embedded login flow");
         var tcs = new TaskCompletionSource<bool>();
 
 #if WINDOWS

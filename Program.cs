@@ -88,6 +88,11 @@ static class TrayApp
         SelfInstall();
         LoadIcons();
         BuildTray();
+        ClaudeWebScraper.StatusUpdate += msg =>
+            Dispatcher.UIThread.Post(() =>
+            {
+                if (_tray != null) _tray.ToolTipText = msg[..Math.Min(127, msg.Length)];
+            });
         StartTimer();
         _ = RefreshAsync();
     }

@@ -10,3 +10,5 @@ Desktop.ini
 *.exe
 bin/
 obj/
+publish/
+config.json
