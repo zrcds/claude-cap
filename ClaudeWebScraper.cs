@@ -189,24 +189,10 @@ sealed class ClaudeWebScraper : IDisposable
 
     private async Task<string?> LoginAsync()
     {
-        Logger.Log("Scraper: opening browser for login");
-        LaunchBrowserAppMode("https://claude.ai/login");
-        StatusUpdate?.Invoke("Sign in to claude.ai in the browser that just opened…");
-
-        var deadline = DateTime.Now.AddMinutes(5);
-        while (DateTime.Now < deadline)
-        {
-            await Task.Delay(2000);
-            var key = BrowserCookieReader.TryGetSessionKey();
-            if (key != null)
-            {
-                Logger.Log("Scraper: received session key from browser");
-                ImportCookie("sessionKey", key, "claude.ai");
-                return key;
-            }
-        }
-
-        Logger.Log("Scraper: browser login timed out — falling back to embedded login");
+        // BrowserCookieReader couldn't read the session key (Chrome 127+ app-bound encryption
+        // prevents reading cookies from outside the browser process). Go straight to the
+        // embedded login window rather than polling for 5 minutes pointlessly.
+        Logger.Log("Scraper: BrowserCookieReader unavailable — using embedded login");
         return await LoginViaWebViewAsync();
     }
 

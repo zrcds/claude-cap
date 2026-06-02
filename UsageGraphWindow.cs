@@ -1,5 +1,6 @@
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Layout;
 using Avalonia.Media;
 using System.Globalization;
 
@@ -7,6 +8,14 @@ namespace ClaudeCap;
 
 class UsageGraphWindow : Window
 {
+    private readonly List<DailyUsage> _allHistory;
+    private readonly double           _currentTotalDollars;
+    private DateTime                  _viewedMonth;
+    private ChartControl              _chart      = null!;
+    private Button                    _prevBtn    = null!;
+    private Button                    _nextBtn    = null!;
+    private TextBlock                 _monthLabel = null!;
+
     public UsageGraphWindow(List<DailyUsage> history, double totalDollars)
     {
         Title                 = "Claude Plan — Usage Trend";
@@ -16,22 +25,123 @@ class UsageGraphWindow : Window
         MinHeight             = 360;
         Background            = new SolidColorBrush(Color.FromRgb(18, 18, 30));
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
-        Content               = new ChartControl(history, totalDollars);
+
+        _allHistory          = history;
+        _currentTotalDollars = totalDollars > 0 ? totalDollars : 250;
+        _viewedMonth         = new DateTime(DateTime.Today.Year, DateTime.Today.Month, 1);
+
+        BuildLayout();
+        UpdateView();
+    }
+
+    private void BuildLayout()
+    {
+        _prevBtn = MakeNavButton("◀");
+        _nextBtn = MakeNavButton("▶");
+
+        _prevBtn.Click += (_, _) => { _viewedMonth = _viewedMonth.AddMonths(-1); UpdateView(); };
+        _nextBtn.Click += (_, _) => { _viewedMonth = _viewedMonth.AddMonths(1);  UpdateView(); };
+
+        _monthLabel = new TextBlock
+        {
+            FontSize            = 12,
+            FontFamily          = new FontFamily("Segoe UI"),
+            Foreground          = new SolidColorBrush(Colors.White),
+            VerticalAlignment   = VerticalAlignment.Center,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Width               = 130,
+            TextAlignment       = TextAlignment.Center,
+        };
+
+        var nav = new StackPanel
+        {
+            Orientation         = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Margin              = new Thickness(0, 8, 0, 4),
+            Spacing             = 8,
+        };
+        nav.Children.Add(_prevBtn);
+        nav.Children.Add(_monthLabel);
+        nav.Children.Add(_nextBtn);
+
+        _chart = new ChartControl(_allHistory, _currentTotalDollars, _viewedMonth);
+
+        var dock = new DockPanel { LastChildFill = true };
+        DockPanel.SetDock(nav, Dock.Top);
+        dock.Children.Add(nav);
+        dock.Children.Add(_chart);
+
+        Content = dock;
+    }
+
+    private static Button MakeNavButton(string text) => new()
+    {
+        Content           = text,
+        FontFamily        = new FontFamily("Segoe UI"),
+        FontSize          = 13,
+        Foreground        = new SolidColorBrush(Colors.White),
+        Background        = new SolidColorBrush(Color.FromArgb(40, 255, 255, 255)),
+        BorderThickness   = new Thickness(0),
+        Padding           = new Thickness(12, 4),
+        CornerRadius      = new CornerRadius(4),
+        VerticalAlignment = VerticalAlignment.Center,
+    };
+
+    private void UpdateView()
+    {
+        var today        = DateTime.Today;
+        var currentMonth = new DateTime(today.Year, today.Month, 1);
+
+        var availableMonths = _allHistory
+            .Select(d => DateTime.Parse(d.Timestamp))
+            .Select(dt => new DateTime(dt.Year, dt.Month, 1))
+            .Distinct()
+            .OrderBy(m => m)
+            .ToList();
+
+        _monthLabel.Text   = _viewedMonth.ToString("MMMM yyyy");
+        _prevBtn.IsEnabled = availableMonths.Any(m => m < _viewedMonth);
+        _nextBtn.IsEnabled = _viewedMonth < currentMonth;
+        _prevBtn.Opacity   = _prevBtn.IsEnabled ? 1.0 : 0.3;
+        _nextBtn.Opacity   = _nextBtn.IsEnabled ? 1.0 : 0.3;
+
+        // For past months use TotalDollars from that month's recorded data
+        double monthTotal = _currentTotalDollars;
+        if (_viewedMonth < currentMonth)
+        {
+            var monthEntries = _allHistory.Where(d => {
+                var dt = DateTime.Parse(d.Timestamp);
+                return dt.Year == _viewedMonth.Year && dt.Month == _viewedMonth.Month;
+            }).ToList();
+            if (monthEntries.Count > 0)
+                monthTotal = monthEntries.Max(e => e.TotalDollars);
+        }
+
+        _chart.SetMonth(_viewedMonth, monthTotal);
     }
 }
 
 class ChartControl : Control
 {
-    readonly List<DailyUsage> _history;
-    readonly double           _totalDollars;
+    private List<DailyUsage> _history;
+    private double           _totalDollars;
+    private DateTime         _viewedMonth;
 
     static readonly Color AccentBlue   = Color.FromArgb(255,  99, 149, 255);
     static readonly Color AccentOrange = Color.FromArgb(255, 255, 165,   0);
 
-    public ChartControl(List<DailyUsage> history, double totalDollars)
+    public ChartControl(List<DailyUsage> history, double totalDollars, DateTime viewedMonth)
     {
         _history      = history;
         _totalDollars = totalDollars > 0 ? totalDollars : 250;
+        _viewedMonth  = viewedMonth;
+    }
+
+    public void SetMonth(DateTime month, double totalDollars)
+    {
+        _viewedMonth  = month;
+        _totalDollars = totalDollars > 0 ? totalDollars : 250;
+        InvalidateVisual();
     }
 
     public override void Render(DrawingContext ctx)
@@ -39,36 +149,38 @@ class ChartControl : Control
         double w = Bounds.Width;
         double h = Bounds.Height;
 
-        IBrush whiteBrush  = new SolidColorBrush(Colors.White);
-        IBrush dimBrush    = new SolidColorBrush(Colors.DimGray);
-        IBrush blueBrush   = new SolidColorBrush(AccentBlue);
+        IBrush whiteBrush = new SolidColorBrush(Colors.White);
+        IBrush dimBrush   = new SolidColorBrush(Colors.DimGray);
+        IBrush blueBrush  = new SolidColorBrush(AccentBlue);
 
         var normalTypeface = new Typeface("Segoe UI");
         var boldTypeface   = new Typeface("Segoe UI", FontStyle.Normal, FontWeight.Bold);
 
-        // ── Title ─────────────────────────────────────────────────────────────
-        var titleFt = new FormattedText(
-            $"Claude Plan — {DateTime.Today:MMMM yyyy}",
-            CultureInfo.CurrentCulture, FlowDirection.LeftToRight, boldTypeface, 10, whiteBrush);
-        ctx.DrawText(titleFt, new Point(w / 2 - titleFt.Width / 2, 13));
+        var today          = DateTime.Today;
+        var isCurrentMonth = _viewedMonth.Year == today.Year && _viewedMonth.Month == today.Month;
 
         // ── No data ───────────────────────────────────────────────────────────
-        var today = DateTime.Today;
-        if (!_history.Any(d => { var dt = DateTime.Parse(d.Timestamp); return dt.Year == today.Year && dt.Month == today.Month; }))
+        bool hasData = _history.Any(d => {
+            var dt = DateTime.Parse(d.Timestamp);
+            return dt.Year == _viewedMonth.Year && dt.Month == _viewedMonth.Month;
+        });
+
+        if (!hasData)
         {
-            var noDataFt = new FormattedText(
-                "No history yet.\nData will appear after the next fetch.",
+            var msg     = isCurrentMonth ? "No history yet.\nData will appear after the next fetch."
+                                         : "No data recorded for this period.";
+            var noDataFt = new FormattedText(msg,
                 CultureInfo.CurrentCulture, FlowDirection.LeftToRight, normalTypeface, 11, dimBrush);
             ctx.DrawText(noDataFt, new Point(w / 2 - noDataFt.Width / 2, h / 2 - noDataFt.Height / 2));
             return;
         }
 
-        const double padL = 64, padR = 24, padT = 42, padB = 56;
+        const double padL = 64, padR = 24, padT = 24, padB = 56;
         var chart = new Rect(padL, padT, w - padL - padR, h - padT - padB);
 
-        // ── Date range — current month only ──────────────────────────────────
-        var firstDate = new DateTime(today.Year, today.Month, 1);
-        var endDate   = new DateTime(today.Year, today.Month, DateTime.DaysInMonth(today.Year, today.Month));
+        var firstDate = _viewedMonth;
+        var endDate   = new DateTime(_viewedMonth.Year, _viewedMonth.Month,
+                            DateTime.DaysInMonth(_viewedMonth.Year, _viewedMonth.Month));
         int totalDays = Math.Max((endDate - firstDate).Days + 1, 2);
         double maxY   = _totalDollars * 1.08;
 
@@ -104,10 +216,10 @@ class ChartControl : Control
             new SolidColorBrush(Colors.OrangeRed));
         ctx.DrawText(limitLabelFt, new Point(chart.Right - limitLabelFt.Width, limitY + 2));
 
-        // ── Data points — current month only ─────────────────────────────────
+        // ── Data points for viewed month ──────────────────────────────────────
         var pts = _history
             .Select(d => new { Date = DateTime.Parse(d.Timestamp), d.UsedDollars })
-            .Where(d => d.Date.Year == today.Year && d.Date.Month == today.Month)
+            .Where(d => d.Date.Year == _viewedMonth.Year && d.Date.Month == _viewedMonth.Month)
             .OrderBy(d => d.Date)
             .ToList();
 
@@ -150,11 +262,11 @@ class ChartControl : Control
             ctx.DrawEllipse(whiteBrush, null, new Rect(pt.X - 1.5, pt.Y - 1.5, 3, 3));
         }
 
-        // ── Trend line (linear regression) ────────────────────────────────────
+        // ── Trend line — current month only ───────────────────────────────────
         string summaryText  = "";
         Color  summaryColor = Color.FromRgb(100, 210, 120);
 
-        if (pts.Count >= 2)
+        if (isCurrentMonth && pts.Count >= 2)
         {
             double[] xs  = pts.Select(p => (p.Date - firstDate).TotalDays).ToArray();
             double[] ys  = pts.Select(p => p.UsedDollars).ToArray();
@@ -195,6 +307,14 @@ class ChartControl : Control
                 }
             }
         }
+        else if (!isCurrentMonth && pts.Count > 0)
+        {
+            // Past month: show actual final spend
+            double finalSpend = pts[^1].UsedDollars;
+            double pct        = _totalDollars > 0 ? finalSpend / _totalDollars * 100 : 0;
+            summaryText  = $"Month total: ${finalSpend:F2} of ${_totalDollars:F0} ({pct:F0}%)";
+            summaryColor = finalSpend >= _totalDollars ? Colors.Orange : Color.FromRgb(100, 210, 120);
+        }
 
         // ── X axis ────────────────────────────────────────────────────────────
         var axisPen = new Pen(new SolidColorBrush(Color.FromArgb(70, 255, 255, 255)), 1);
@@ -215,8 +335,8 @@ class ChartControl : Control
             DrawDateLabel(midDate, 0.5);
         DrawDateLabel(endDate, 1);
 
-        // ── Today marker ──────────────────────────────────────────────────────
-        if (today >= firstDate && today <= endDate)
+        // ── Today marker — current month only ────────────────────────────────
+        if (isCurrentMonth && today >= firstDate && today <= endDate)
         {
             var todayPen = new Pen(new SolidColorBrush(Color.FromArgb(60, 255, 255, 255)), 1,
                                new DashStyle(new double[] { 1, 2 }, 0));
