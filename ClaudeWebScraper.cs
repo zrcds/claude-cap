@@ -344,49 +344,67 @@ sealed class ClaudeWebScraper : IDisposable
             if (accountJson == null) return null;
 
             string? accountUuid = null;
-            string? orgUuid     = null;
+            var orgUuids = new List<string>();
             using (var accountDoc = JsonDocument.Parse(accountJson))
             {
                 var acc = accountDoc.RootElement;
                 if (acc.TryGetProperty("uuid", out var au)) accountUuid = au.GetString();
-                if (acc.TryGetProperty("memberships", out var memberships) &&
-                    memberships.GetArrayLength() > 0)
+                if (acc.TryGetProperty("memberships", out var memberships))
                 {
-                    var membership = memberships[0];
-                    if (membership.TryGetProperty("organization", out var org) &&
-                        org.TryGetProperty("uuid", out var ou))
-                        orgUuid = ou.GetString();
+                    foreach (var membership in memberships.EnumerateArray())
+                    {
+                        if (membership.TryGetProperty("organization", out var org) &&
+                            org.TryGetProperty("uuid", out var ou) &&
+                            ou.GetString() is string orgUuidValue)
+                            orgUuids.Add(orgUuidValue);
+                    }
                 }
             }
 
-            Logger.Log($"Scraper: orgUuid={orgUuid} accountUuid={accountUuid}");
-            if (string.IsNullOrEmpty(orgUuid)) return null;
+            Logger.Log($"Scraper: accountUuid={accountUuid} orgUuids=[{string.Join(",", orgUuids)}]");
+            if (orgUuids.Count == 0) return null;
 
-            var qs        = accountUuid != null ? $"?account_uuid={accountUuid}" : "";
-            var usageUrl  = $"https://claude.ai/api/organizations/{orgUuid}/overage_spend_limit{qs}";
-            var usageJson = await BrowserFetchAsync(usageUrl);
-            if (usageJson == null) return null;
-            Logger.Log($"Scraper: usage: {usageJson[..Math.Min(300, usageJson.Length)]}");
-
-            using var usageDoc = JsonDocument.Parse(usageJson);
-            var root  = usageDoc.RootElement;
-            var used  = root.GetProperty("used_credits").GetInt32();
-            var total = root.GetProperty("monthly_credit_limit").GetInt32();
-            if (total <= 0) return null;
-
-            string? resetDate = null;
-            foreach (var field in new[] { "billing_period_ends_at", "period_ends_at", "billing_period_end", "next_reset_at", "reset_at" })
+            // Accounts can belong to multiple orgs (e.g. a personal org plus a team org);
+            // not every membership grants access to the spend-limit endpoint, so try each
+            // until one succeeds rather than assuming the first membership is the right one.
+            var qs = accountUuid != null ? $"?account_uuid={accountUuid}" : "";
+            foreach (var orgUuid in orgUuids)
             {
-                if (root.TryGetProperty(field, out var dt) &&
-                    DateTime.TryParse(dt.GetString(), out var d))
+                var usageUrl  = $"https://claude.ai/api/organizations/{orgUuid}/overage_spend_limit{qs}";
+                var usageJson = await BrowserFetchAsync(usageUrl);
+                if (usageJson == null)
                 {
-                    resetDate = d.ToString("MMM d");
-                    break;
+                    Logger.Log($"Scraper: org {orgUuid} usage fetch failed, trying next membership");
+                    continue;
                 }
+
+                using var usageDoc = JsonDocument.Parse(usageJson);
+                var root  = usageDoc.RootElement;
+                var used  = root.GetProperty("used_credits").GetInt32();
+                var total = root.GetProperty("monthly_credit_limit").GetInt32();
+                if (total <= 0)
+                {
+                    Logger.Log($"Scraper: org {orgUuid} has no credit limit, trying next membership");
+                    continue;
+                }
+
+                string? resetDate = null;
+                foreach (var field in new[] { "billing_period_ends_at", "period_ends_at", "billing_period_end", "next_reset_at", "reset_at" })
+                {
+                    if (root.TryGetProperty(field, out var dt) &&
+                        DateTime.TryParse(dt.GetString(), out var d))
+                    {
+                        resetDate = d.ToString("MMM d");
+                        break;
+                    }
+                }
+                resetDate ??= new DateTime(DateTime.Now.Year, DateTime.Now.Month, 1).AddMonths(1).ToString("MMM d");
+                Logger.Log($"Scraper: org {orgUuid} resetDate={resetDate}");
+                return new UsageResult((int)Math.Round((double)used / total * 100), used, total, resetDate);
             }
-            resetDate ??= new DateTime(DateTime.Now.Year, DateTime.Now.Month, 1).AddMonths(1).ToString("MMM d");
-            Logger.Log($"Scraper: resetDate={resetDate}");
-            return new UsageResult((int)Math.Round((double)used / total * 100), used, total, resetDate);
+
+            Logger.Log("Scraper: no membership org returned usable usage data");
+            return null;
         }
         catch (Exception ex)
         {
