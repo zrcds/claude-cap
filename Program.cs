@@ -72,8 +72,10 @@ static class TrayApp
 
     public static void Start(IClassicDesktopStyleApplicationLifetime desktop)
     {
-        Logger.Clear();
-        Logger.Log("=== ClaudeCap starting (Avalonia) ===");
+        Logger.TrimIfLarge();
+        Logger.Log($"=== ClaudeCap starting (Avalonia) pid={Environment.ProcessId} session={Environment.GetEnvironmentVariable("SESSIONNAME") ?? "?"} args=[{string.Join(' ', Environment.GetCommandLineArgs().Skip(1))}] ===");
+        AppDomain.CurrentDomain.UnhandledException += (_, e) => Logger.Log($"FATAL unhandled exception: {e.ExceptionObject}");
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => Logger.Log($"=== ClaudeCap exiting pid={Environment.ProcessId} ===");
 
         var mutex = new System.Threading.Mutex(true, AppName, out bool isNew);
         if (!isNew)

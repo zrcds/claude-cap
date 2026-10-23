@@ -19,6 +19,17 @@ static class Logger
         catch { }
     }
 
+    // Keep history across launches so a failed autostart leaves a trace; start fresh once past 1 MB.
+    public static void TrimIfLarge()
+    {
+        try
+        {
+            var info = new FileInfo(LogPath);
+            if (info.Exists && info.Length > 1_000_000) File.WriteAllText(LogPath, "");
+        }
+        catch { }
+    }
+
     public static void Clear()
     {
         try { File.WriteAllText(LogPath, ""); } catch { }
